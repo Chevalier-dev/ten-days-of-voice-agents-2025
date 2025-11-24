@@ -26,58 +26,84 @@ import json
 from datetime import datetime
 from typing import List
 
+def load_previous_checkins():
+    """Load stored wellness check-ins from wellness_log.json."""
+    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    log_path = os.path.join(base_dir, "wellness_log.json")
+
+    if not os.path.exists(log_path):
+        return []
+
+    try:
+        with open(log_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
 @function_tool
-async def save_order(
+async def save_checkin(
     ctx: RunContext,
-    drinkType: str,
-    size: str,
-    milk: str,
-    extras: List[str],
-    name: str,
+    mood: str,
+    energy: str,
+    goals: List[str],
+    summary: str,
 ) -> str:
-    """Save the completed CCD order to a JSON file."""
-    
-    order = {
-        "drinkType": drinkType,
-        "size": size,
-        "milk": milk,
-        "extras": extras or [],
-        "name": name,
-    }
+    """Save a daily health & wellness check-in to a JSON file."""
 
     base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    orders_dir = os.path.join(base_dir, "orders")
-    os.makedirs(orders_dir, exist_ok=True)
+    log_path = os.path.join(base_dir, "wellness_log.json")
 
-    ts = datetime.utcnow().isoformat(timespec="seconds").replace(":", "-")
-    filename = f"order_{ts}.json"
-    path = os.path.join(orders_dir, filename)
+    # Load existing log (or create new)
+    if os.path.exists(log_path):
+        with open(log_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    else:
+        data = []
 
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(order, f, indent=2)
+    entry = {
+        "timestamp": datetime.utcnow().isoformat(timespec="seconds"),
+        "mood": mood,
+        "energy": energy,
+        "goals": goals,
+        "summary": summary,
+    }
 
-    return f"saved:{path}"
+    data.append(entry)
+
+    # Persist file
+    with open(log_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+    return "saved"
 
 
 class Assistant(Agent):
     def __init__(self) -> None:
+        previous_checkins = load_previous_checkins()
+        memory_hint = ""
+
+        if previous_checkins:
+            last = previous_checkins[-1]
+            memory_hint = (
+                f"Last time, the user reported feeling '{last['mood']}' with energy '{last['energy']}'. "
+                "Reference this gently when beginning today's check-in."
+            )
         super().__init__(
             instructions=(
-    "You are a friendly barista for Café Coffee Day. "
-    "When a new session begins, greet the user immediately with a warm welcome. "
-    "Right after greeting, list the main coffee options you serve clearly, such as: "
-    "Americano, Cappuccino, Latte, Mocha, Espresso, Flat White, and Cold Coffee. "
-    "Then politely ask the user which drink they would like. "
-    "After they choose a drink, guide them through size, milk preference, extras, and name. "
-    "Continue asking clarifying questions until all fields in the order state are filled: "
-    "{ drinkType, size, milk, extras[], name }. "
-    "Once the order is fully confirmed, call the tool "
-    "save_order(drinkType, size, milk, extras, name). "
-    "After saving, give a short confirmation message including the customer's name. "
-    "Your tone must be friendly, concise, and simple. No emojis or special formatting."
-)
-,
-            tools=[save_order],
+                "You are a daily health and wellness voice companion. "
+                "When a new session begins, greet the user immediately and start a gentle check-in. "
+                "Ask about mood, energy, and what they want to focus on today. "
+                "Keep responses grounded, supportive, and non-clinical. "
+                "\nYour job each session:\n"
+                "- Ask how the user feels today.\n"
+                "- Ask about energy levels.\n"
+                "- Ask for 1–3 simple goals for the day.\n"
+                "- Recap what they said.\n"
+                "- Then call the tool save_checkin(mood, energy, goals, summary).\n"
+                "After calling the tool, give a brief friendly closing message.\n"
+                "If past check-ins exist, mention at least one insight (e.g., 'Yesterday you said your energy was low—how is it today?')."
+            ),
+            tools=[save_checkin],
         )
     # To add tools, use the @function_tool decorator.
     # Here's an example that adds a simple weather tool.

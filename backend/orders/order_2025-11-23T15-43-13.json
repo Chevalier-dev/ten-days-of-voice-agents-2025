@@ -1,0 +1,9 @@
+{
+  "drinkType": "Mocha",
+  "size": "Large",
+  "milk": "Oat milk",
+  "extras": [
+    "Flavored syrup"
+  ],
+  "name": "Para daemon"
+}

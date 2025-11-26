@@ -1,0 +1,15 @@
+{
+  "timestamp": "2025-11-26T20:18:11.317308",
+  "lead_data": {
+    "name": "John",
+    "email": "John at x y g dot com.",
+    "company": "X y z.",
+    "role": "CEO",
+    "team_size": "120",
+    "timeline": "later",
+    "need": "all the financial services Razorpay has to offer.",
+    "demo_features": "transaction fees, UPI setup, account opening"
+  },
+  "conversation_transcript": [],
+  "detected_persona": null
+}

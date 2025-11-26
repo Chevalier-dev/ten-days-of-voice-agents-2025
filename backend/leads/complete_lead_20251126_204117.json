@@ -1,0 +1,27 @@
+{
+  "timestamp": "2025-11-26T20:41:17.509725",
+  "lead_data": {
+    "name": "Sook Kumar",
+    "email": "Sukumar@xyz.com",
+    "company": "XYZ Global",
+    "role": "Founder",
+    "detected_persona": "founder",
+    "team_size": "120",
+    "timeline": "later",
+    "need": "Information on Razorpay for online business",
+    "booked_meeting": {
+      "id": "meeting_20251126_204052",
+      "slot_id": "slot_8",
+      "date": "2025-11-27",
+      "time": "10:00 AM",
+      "duration": "30 minutes",
+      "type": "demo",
+      "lead_name": "Sook Kumar",
+      "lead_email": "Sukumar@xyz.com",
+      "lead_company": "XYZ Global",
+      "booked_at": "2025-11-26T20:40:52.996081"
+    }
+  },
+  "conversation_transcript": [],
+  "detected_persona": "founder"
+}

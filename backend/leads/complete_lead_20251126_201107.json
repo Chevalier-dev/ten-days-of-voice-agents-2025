@@ -1,0 +1,16 @@
+{
+  "timestamp": "2025-11-26T20:11:07.268834",
+  "lead_data": {
+    "name": "Sokomosh",
+    "email": "Sukumar@redxyz.com",
+    "company": "xyz",
+    "role": "CEO",
+    "team_size": "39",
+    "timeline": "soon",
+    "need": "UPI enabled",
+    "challenges_with_payments": "It is not free",
+    "specific_features_for_demo": "International payments"
+  },
+  "conversation_transcript": [],
+  "detected_persona": null
+}

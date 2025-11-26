@@ -1,470 +1,401 @@
-
-import os
-import re
-import json
 import logging
-from typing import List, Dict, Any, Optional
+import json
+import os
 from datetime import datetime
+from typing import Dict, Any, Optional
 
 from dotenv import load_dotenv
-
-# livekit agents imports
 from livekit.agents import (
     Agent,
     AgentSession,
     JobContext,
     JobProcess,
+    MetricsCollectedEvent,
     RoomInputOptions,
     WorkerOptions,
     cli,
-    RunContext,
+    metrics,
+    tokenize,
     function_tool,
+    RunContext
 )
-from livekit.plugins import google, murf, deepgram, silero, noise_cancellation
+from livekit.plugins import murf, silero, google, deepgram, noise_cancellation
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
+logger = logging.getLogger("agent")
+
 load_dotenv(".env.local")
-logger = logging.getLogger("day4.tutor")
 
-# -----------------------
-# Paths & constants
-# -----------------------
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-SHARED_DATA_DIR = os.path.join(ROOT, "shared-data")
-CONTENT_PATH = os.path.join(SHARED_DATA_DIR, "day4_tutor_content.json")
-STATE_DIR = os.path.join(ROOT, "tutor_state")
-os.makedirs(STATE_DIR, exist_ok=True)
-STATE_PATH = os.path.join(STATE_DIR, "tutor_state.json")
 
-# Voice mapping
-VOICE_LEARN = "Matthew"
-VOICE_QUIZ = "Anusha"
-VOICE_TEACH = "Ken"
-
-# -----------------------
-# Helpers: load/save
-# -----------------------
-def load_content() -> List[Dict[str, Any]]:
-    if not os.path.exists(CONTENT_PATH):
-        logger.error("Day4 content file not found at %s", CONTENT_PATH)
-        return []
-    with open(CONTENT_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-def load_state() -> Dict[str, Any]:
-    if not os.path.exists(STATE_PATH):
-        return {"last_mode": None, "last_concept": None, "mastery": {}}
-    try:
-        with open(STATE_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        logger.warning("Failed to load state: %s", e)
-        return {"last_mode": None, "last_concept": None, "mastery": {}}
-
-def save_state(state: Dict[str, Any]):
-    try:
-        with open(STATE_PATH, "w", encoding="utf-8") as f:
-            json.dump(state, f, indent=2, ensure_ascii=False)
-    except Exception as e:
-        logger.error("Failed to save state: %s", e)
-
-# -----------------------
-# Voice switching helper
-# -----------------------
-def switch_session_voice(session: AgentSession, new_voice: str):
-    """Switch the session's TTS voice by replacing the TTS instance"""
-    try:
-        logger.info(f"🎤 Switching session voice to: {new_voice}")
-        logger.info(f"Session type: {type(session)}")
-        logger.info(f"Session attributes: {[attr for attr in dir(session) if 'tts' in attr.lower()]}")
+class SimpleSDRAssistant(Agent):
+    def __init__(self) -> None:
+        self.company_data = self._load_company_data()
+        self.personas_data = self._load_personas_data()
+        self.calendar_data = self._load_calendar_data()
+        self.lead_data = {}
+        self.conversation_transcript = []
+        self.detected_persona = None
+        self.conversation_ended = False
         
-        new_tts = murf.TTS(
-            voice=new_voice,
-            style="Conversation",
-            text_pacing=True
-        )
-        
-        # Try multiple ways to replace TTS
-        updated = False
-        if hasattr(session, '_tts'):
-            old_tts = getattr(session, '_tts', None)
-            session._tts = new_tts
-            logger.info(f"Updated session._tts from {old_tts} to {new_tts}")
-            updated = True
-            
-        if hasattr(session, 'tts'):
-            old_tts = getattr(session, 'tts', None)
-            session.tts = new_tts
-            logger.info(f"Updated session.tts from {old_tts} to {new_tts}")
-            updated = True
-        
-        # Force update internal TTS references
-        try:
-            if hasattr(session, '_agent_output') and hasattr(session._agent_output, '_tts'):
-                session._agent_output._tts = new_tts
-                logger.info("Updated session._agent_output._tts")
-                updated = True
-        except Exception as e:
-            logger.warning(f"Could not update _agent_output._tts: {e}")
-            
-        if updated:
-            logger.info(f"✓ Session voice switched to {new_voice}")
-        else:
-            logger.warning("No TTS attributes found to update")
-            
-        return updated
-    except Exception as e:
-        logger.error(f"Voice switch failed: {e}", exc_info=True)
-        return False
-
-# -----------------------
-# Small evaluation helpers
-# -----------------------
-def score_explanation(reference: str, user_text: str) -> Dict[str, Any]:
-    """Simple overlap-based scoring (0-100) + short feedback."""
-    def words(s):
-        return re.findall(r"\w+", (s or "").lower())
-    ref_words = set(words(reference))
-    user_words = set(words(user_text))
-    if not ref_words:
-        return {"score": 0, "feedback": "No reference available to score against."}
-    common = ref_words & user_words
-    ratio = len(common) / max(len(ref_words), 1)
-    score = int(min(100, round(ratio * 100)))
-    if score >= 80:
-        fb = "Excellent — you covered the key points clearly."
-    elif score >= 50:
-        fb = "Good — you covered several ideas but missed some details."
-    else:
-        fb = "Nice attempt — try to state the core idea and one short example."
-    return {"score": score, "feedback": fb}
-
-# -----------------------
-# Tools exposed to LLM / agent flow
-# -----------------------
-@function_tool
-async def list_concepts(ctx: RunContext[dict]):
-    """List all available programming concepts that can be learned."""
-    content = load_content()
-    if not content:
-        return "No concepts available."
-    lines = [f"- {c['id']}: {c.get('title','')}" for c in content]
-    return "Available concepts:\n" + "\n".join(lines)
-
-@function_tool
-async def set_concept(ctx: RunContext[dict], concept_id: str):
-    """Select a concept by its ID to work with (e.g., 'variables', 'loops')."""
-    content = load_content()
-    cid = (concept_id or "").strip()
-    match = next((c for c in content if c["id"] == cid), None)
-    if not match:
-        return f"Concept '{cid}' not found. Use list_concepts to see IDs."
-    ctx.userdata["tutor"]["concept_id"] = cid
-    state = load_state()
-    state["last_concept"] = cid
-    save_state(state)
-    return f"Concept set to: {match.get('title', cid)}"
-
-
-
-@function_tool
-async def explain_concept(ctx: RunContext[dict]):
-    """Explain the currently selected concept in detail."""
-    cid = ctx.userdata["tutor"].get("concept_id")
-    if not cid:
-        return "No concept selected. Use set_concept to pick one."
-    content = load_content()
-    match = next((c for c in content if c["id"] == cid), None)
-    if not match:
-        return "Selected concept not found."
-    # Mark explained count
-    state = load_state()
-    state.setdefault("mastery", {})
-    ms = state["mastery"].get(cid, {"times_explained": 0, "times_quizzed": 0, "times_taught_back": 0, "last_score": None, "avg_score": None})
-    ms["times_explained"] = ms.get("times_explained", 0) + 1
-    state["mastery"][cid] = ms
-    save_state(state)
-    return f"{match.get('title')}: {match.get('summary')}"
-
-@function_tool
-async def get_mcq(ctx: RunContext[dict]):
-    """Get the next multiple-choice quiz question for the selected concept."""
-    cid = ctx.userdata["tutor"].get("concept_id")
-    if not cid:
-        return {"error": "No concept selected"}
-    content = load_content()
-    match = next((c for c in content if c["id"] == cid), None)
-    if not match:
-        return {"error": "Concept not found"}
-    questions = match.get("quiz", []) or match.get("mcq", [])
-    if not questions:
-        return {"error": "No quiz questions for this concept"}
-    # maintain rotation index in userdata
-    idx = ctx.userdata["tutor"].get("quiz_index", 0) % len(questions)
-    ctx.userdata["tutor"]["quiz_index"] = idx + 1
-    q = questions[idx]
-    return {"question": q["question"], "options": q["options"], "answer": q["answer"], "index": idx}
-
-@function_tool
-async def evaluate_mcq(ctx: RunContext[dict], user_answer: str):
-    """Score the user's multiple-choice quiz answer and return feedback."""
-    cid = ctx.userdata["tutor"].get("concept_id")
-    if not cid:
-        return {"error": "No concept selected"}
-    content = load_content()
-    match = next((c for c in content if c["id"] == cid), None)
-    if not match:
-        return {"error": "Concept not found"}
-    # fetch last asked question index
-    idx = (ctx.userdata["tutor"].get("quiz_index", 1) - 1)
-    questions = match.get("quiz", []) or match.get("mcq", [])
-    if not questions:
-        return {"error": "No questions"}
-    if idx < 0 or idx >= len(questions):
-        idx = max(0, len(questions) - 1)
-    q = questions[idx]
-    correct_i = q["answer"]
-    options = q["options"]
-    ua = (user_answer or "").lower().strip()
-
-    # 1) letter (a/b/c/d)
-    sel = None
-    m = re.search(r"\b([abcd])\b", ua)
-    if m:
-        sel = ord(m.group(1)) - 97
-    else:
-        # number 1-4
-        m2 = re.search(r"\b([1-4])\b", ua)
-        if m2:
-            sel = int(m2.group(1)) - 1
-
-    # 2) match option text
-    if sel is None:
-        for i, opt in enumerate(options):
-            if opt.lower() in ua:
-                sel = i
-                break
-    # 3) partial overlap heuristic
-    if sel is None:
-        ua_words = set(re.findall(r"\w+", ua))
-        best_i = None
-        best_score = 0
-        for i, opt in enumerate(options):
-            opt_words = set(re.findall(r"\w+", opt.lower()))
-            common = ua_words & opt_words
-            if len(common) > best_score:
-                best_score = len(common)
-                best_i = i
-        if best_score >= 1:
-            sel = best_i
-
-    # 4) final fallback check for any keyword from correct option
-    if sel is None:
-        for w in re.findall(r"\w+", options[correct_i].lower()):
-            if w in ua:
-                sel = correct_i
-                break
-
-    correct = (sel == correct_i)
-    feedback = ("Correct — well done!" if correct else f"Not quite. Correct answer: {options[correct_i]}.")
-    # update mastery
-    state = load_state()
-    state.setdefault("mastery", {})
-    ms = state["mastery"].get(cid, {"times_explained": 0, "times_quizzed": 0, "times_taught_back": 0, "last_score": None, "avg_score": None})
-    ms["times_quizzed"] = ms.get("times_quizzed", 0) + 1
-    sc = 100 if correct else 0
-    ms["last_score"] = sc
-    prev = ms.get("avg_score")
-    ms["avg_score"] = sc if prev is None else round((prev + sc) / 2, 1)
-    state["mastery"][cid] = ms
-    save_state(state)
-
-    return {"correct": bool(correct), "selected": sel, "correct_index": correct_i, "feedback": feedback}
-
-@function_tool
-async def evaluate_teachback(ctx: RunContext[dict], explanation: str):
-    """Score the user's explanation in teach-back mode and return feedback."""
-    cid = ctx.userdata["tutor"].get("concept_id")
-    if not cid:
-        return {"error": "No concept selected"}
-    content = load_content()
-    match = next((c for c in content if c["id"] == cid), None)
-    if not match:
-        return {"error": "Concept not found"}
-    result = score_explanation(match.get("summary", ""), explanation or "")
-    # update mastery
-    state = load_state()
-    state.setdefault("mastery", {})
-    ms = state["mastery"].get(cid, {"times_explained": 0, "times_quizzed": 0, "times_taught_back": 0, "last_score": None, "avg_score": None})
-    ms["times_taught_back"] = ms.get("times_taught_back", 0) + 1
-    ms["last_score"] = result["score"]
-    prev = ms.get("avg_score")
-    ms["avg_score"] = result["score"] if prev is None else round((prev + result["score"]) / 2, 1)
-    state["mastery"][cid] = ms
-    save_state(state)
-    return result
-
-@function_tool
-async def get_mastery_report(ctx: RunContext[dict]):
-    """Get a detailed report of the user's mastery progress across all concepts."""
-    state = load_state()
-    mastery = state.get("mastery", {})
-    if not mastery:
-        return "No mastery data yet."
-    lines = []
-    for cid, info in mastery.items():
-        lines.append(f"{cid}: last={info.get('last_score')}, avg={info.get('avg_score')}, taught_back={info.get('times_taught_back')}, quizzed={info.get('times_quizzed')}")
-    return "Mastery:\n" + "\n".join(lines)
-
-
-
-@function_tool
-async def set_mode(ctx: RunContext[dict], mode: str):
-    """Change the learning mode and switch voice: 'learn', 'quiz', or 'teach_back'."""
-    m = (mode or "").strip().lower()
-    if m not in ("learn", "quiz", "teach_back"):
-        return "Unknown mode. Choose 'learn', 'quiz', or 'teach_back'."
-    
-    ctx.userdata["tutor"]["mode"] = m
-    state = load_state()
-    state["last_mode"] = m
-    save_state(state)
-    
-    # Switch voice based on mode
-    voice_map = {
-        "learn": VOICE_LEARN,
-        "quiz": VOICE_QUIZ,
-        "teach_back": VOICE_TEACH,
-    }
-    
-    new_voice = voice_map.get(m, VOICE_LEARN)
-    session_ref = ctx.userdata.get('_session_ref')
-    if session_ref:
-        switch_session_voice(session_ref, new_voice)
-    
-    return f"Mode set to: {m}. Voice switched to {new_voice}."
-
-# -----------------------
-# Single Tutor Agent with Voice Switching
-# -----------------------
-class TutorAgent(Agent):
-    """Active Recall Tutor with dynamic voice switching"""
-    def __init__(self, content: List[dict]):
-        instructions = """You are an Active Recall Tech Tutor with three modes:
-
-LEARN MODE (Matthew voice): Explain concepts clearly and thoroughly
-QUIZ MODE (Anusha voice): Ask multiple-choice questions energetically  
-TEACH-BACK MODE (Ken voice): Listen to student explanations supportively
-
-When user wants concepts:
-1. Call list_concepts() to show available topics
-2. Ask which concept they want
-
-When user selects concept:
-1. Call set_concept(concept_id)
-2. Ask which mode they prefer
-
-When user chooses mode:
-1. Call set_mode(mode) - this switches voice automatically
-2. Execute the mode:
-   - Learn: Call explain_concept()
-   - Quiz: Call get_mcq() then evaluate_mcq()
-   - Teach-back: Ask for explanation then evaluate_teachback()
-
-RULES:
-- ALWAYS use tools, never make up responses
-- Keep responses SHORT and mode-appropriate
-- Voice changes automatically with set_mode
-- Adapt personality to current mode"""
-
         super().__init__(
-            instructions=instructions,
-            tools=[
-                list_concepts,
-                set_concept,
-                set_mode,
-                explain_concept,
-                get_mcq,
-                evaluate_mcq,
-                evaluate_teachback,
-                get_mastery_report
-            ]
+            instructions=f"""You are Nikita, SDR for {self.company_data['company']['name']}. Be CONCISE and professional.
+
+MANDATORY OPENING SEQUENCE (ALWAYS DO THIS FIRST):
+1. Greet: "Hi! I'm Nikita from Razorpay. Before we start, I need a few quick details."
+2. Ask for NAME: "What's your name?"
+3. Ask for EMAIL: "What's your email address?"
+4. Ask for COMPANY: "Which company are you from?"
+5. Ask for ROLE: "What's your role there?"
+6. Ask for TEAM SIZE: "How big is your team?"
+7. Ask for TIMELINE: "When are you looking to implement this - now, soon, or later?"
+8. Ask for NEED: "What brings you to Razorpay today? What are you looking for?"
+9. Then say: "Great! Feel free to ask any questions about Razorpay, or I can help you schedule a demo."
+
+INFORMATION COLLECTION RULES:
+- ALWAYS ask for Name, Email, Company, Role, Team Size, Timeline, and Need FIRST
+- Ask ONE question at a time, wait for answer
+- Use store_lead_info() to save each detail immediately
+- After collecting role, use detect_persona() to identify their persona type
+- Don't proceed to demos or questions until you have all basic info
+
+AFTER COLLECTING INFO - FAQ PHASE:
+- Answer their questions using search_faq() tool
+- Use persona-specific language based on detected persona
+- While answering questions, collect pain points and interests naturally
+- ONLY when they say "no more questions", then offer demo
+
+DEMO OFFERING (ONLY AFTER FAQ PHASE):
+- When customer indicates no more questions, say: "Would you like to schedule a demo to see this in action?"
+- If they say YES to demo: Proceed to booking process
+
+BOOKING PROCESS (ONLY IF DEMO ACCEPTED):
+1. Ask: "What are the main challenges you're facing with payments?"
+2. Ask: "What specific features would you like to see in the demo?"
+3. Then say: "Perfect! Let me show you available times."
+4. ALWAYS call show_available_meetings() to check real slots
+5. Present ONLY available options from the tool
+6. Use book_meeting() with their choice
+7. Confirm with their name and email
+
+CRITICAL RULES:
+- NEVER skip the opening sequence
+- NEVER offer demo until customer says "no more questions"
+- NEVER book without email
+- ALWAYS store info using store_lead_info() immediately
+- Keep responses SHORT (1-2 sentences max)
+- Ask one question at a time""",
         )
-        self.content = content
-        self._session = None
     
+    def _load_company_data(self) -> Dict[str, Any]:
+        try:
+            with open("company_data/razorpay_faq.json", "r") as f:
+                return json.load(f)
+        except FileNotFoundError:
+            logger.error("Company FAQ data not found")
+            return {"company": {"name": "Razorpay"}, "faq": []}
+    
+    def _load_personas_data(self) -> Dict[str, Any]:
+        try:
+            with open("personas.json", "r") as f:
+                return json.load(f)
+        except FileNotFoundError:
+            logger.error("Personas data not found")
+            return {"personas": {}}
+    
+    def _load_calendar_data(self) -> Dict[str, Any]:
+        try:
+            with open("mock_calendar.json", "r") as f:
+                return json.load(f)
+        except FileNotFoundError:
+            logger.error("Calendar data not found")
+            return {"available_slots": [], "booked_meetings": []}
+    
+    def _has_required_info(self) -> bool:
+        """Check if all required information has been collected"""
+        required_fields = ["name", "email", "company", "role", "team_size", "timeline", "use_case"]
+        return all(self.lead_data.get(field) for field in required_fields)
+    
+    async def _save_lead_data(self) -> str:
+        """Save lead data to JSON file immediately"""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"leads/lead_{timestamp}.json"
+        
+        lead_summary = {
+            "timestamp": datetime.now().isoformat(),
+            "lead_data": self.lead_data,
+            "conversation_transcript": self.conversation_transcript,
+            "detected_persona": self.detected_persona
+        }
+        
+        os.makedirs("leads", exist_ok=True)
+        with open(filename, "w") as f:
+            json.dump(lead_summary, f, indent=2)
+        
+        logger.info(f"💾 Lead data saved to {filename}")
+        return filename
+
+    @function_tool
+    async def detect_persona(self, context: RunContext, user_input: str) -> str:
+        """Detect user persona based on their language and role."""
+        input_lower = user_input.lower()
+        
+        persona_scores = {}
+        for persona_name, persona_data in self.personas_data.get("personas", {}).items():
+            score = 0
+            for keyword in persona_data.get("keywords", []):
+                if keyword in input_lower:
+                    score += 1
+            persona_scores[persona_name] = score
+        
+        if persona_scores:
+            self.detected_persona = max(persona_scores, key=persona_scores.get)
+            if persona_scores[self.detected_persona] > 0:
+                self.lead_data["detected_persona"] = self.detected_persona
+                return f"Got it! As a {self.detected_persona}, I can share how Razorpay specifically helps people in your role."
+        
+        return "Thanks for sharing! Let me understand your specific needs better."
+    
+    @function_tool
+    async def show_available_meetings(self, context: RunContext, meeting_type: str = "demo") -> str:
+        """Show available meeting slots for scheduling."""
+        available_slots = []
+        
+        for slot in self.calendar_data.get("available_slots", []):
+            if slot.get("available", False) and slot.get("type") == meeting_type:
+                available_slots.append(slot)
+        
+        if not available_slots:
+            return "I don't see any available slots for that meeting type right now. Would you like to try a different time?"
+        
+        options = available_slots[:5]
+        name = self.lead_data.get("name", "")
+        greeting = f"Great {name}! " if name else ""
+        response = f"{greeting}Here are my available times:\n\n"
+        
+        for i, slot in enumerate(options, 1):
+            response += f"{i}. {slot['date']} at {slot['time']} ({slot['duration']})\n"
+        
+        response += "\nWhich slot works best for you? Just say the number."
+        return response
+    
+    @function_tool
+    async def book_meeting(self, context: RunContext, slot_choice: str, meeting_type: str = "demo") -> str:
+        """Book a meeting slot. REQUIRES email to be collected first."""
+        
+        # Check if email is collected
+        if not self.lead_data.get("email"):
+            return "I need your email address first to send the meeting confirmation. What's your email?"
+        
+        available_slots = [s for s in self.calendar_data.get("available_slots", []) 
+                          if s.get("available", False) and s.get("type") == meeting_type]
+        
+        if not available_slots:
+            return "I don't see any available slots for that meeting type. Let me check other options."
+        
+        selected_slot = None
+        
+        try:
+            choice_num = int(slot_choice.strip())
+            if 1 <= choice_num <= len(available_slots):
+                selected_slot = available_slots[choice_num - 1]
+        except ValueError:
+            for slot in available_slots:
+                if slot["time"].lower() in slot_choice.lower() or slot["date"] in slot_choice:
+                    selected_slot = slot
+                    break
+        
+        if not selected_slot:
+            return "I didn't catch which time you prefer. Could you say the number or specific time again?"
+        
+        meeting_details = {
+            "id": f"meeting_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            "slot_id": selected_slot["id"],
+            "date": selected_slot["date"],
+            "time": selected_slot["time"],
+            "duration": selected_slot["duration"],
+            "type": meeting_type,
+            "lead_name": self.lead_data.get("name", "Prospect"),
+            "lead_email": self.lead_data.get("email", ""),
+            "lead_company": self.lead_data.get("company", ""),
+            "booked_at": datetime.now().isoformat()
+        }
+        
+        # Mark slot as unavailable
+        for slot in self.calendar_data["available_slots"]:
+            if slot["id"] == selected_slot["id"]:
+                slot["available"] = False
+                break
+        
+        # Add to booked meetings
+        self.calendar_data["booked_meetings"].append(meeting_details)
+        
+        # Save calendar changes
+        with open("mock_calendar.json", "w") as f:
+            json.dump(self.calendar_data, f, indent=2)
+        
+        # Store meeting in lead data
+        self.lead_data["booked_meeting"] = meeting_details
+        
+        # Save lead data immediately after booking
+        await self._save_lead_data()
+        
+        name = self.lead_data.get("name", "")
+        email = self.lead_data.get("email", "")
+        return f"✅ Perfect! Meeting booked for {selected_slot['date']} at {selected_slot['time']}. I'll send you a confirmation. Thanks {name}!"
+
+    @function_tool
+    async def search_faq(self, context: RunContext, query: str) -> str:
+        """Search company FAQ for relevant information."""
+        query_lower = query.lower()
+        
+        # Simple keyword matching
+        for faq_item in self.company_data.get("faq", []):
+            question = faq_item["question"].lower()
+            answer = faq_item["answer"]
+            
+            # Check if query keywords match question
+            if any(word in question for word in query_lower.split()):
+                return answer
+        
+        # Check products if no FAQ match
+        for product in self.company_data.get("products", []):
+            if any(word in product["name"].lower() for word in query_lower.split()):
+                return f"{product['name']}: {product['description']}"
+        
+        return "I don't have specific information about that. Let me connect you with our team for detailed information."
+    
+    @function_tool
+    async def store_lead_info(self, context: RunContext, field: str, value: str) -> str:
+        """Store lead information as it's collected during conversation."""
+        
+        # Handle list fields (pain_points, key_interests)
+        if field in ["pain_points", "key_interests"]:
+            if field not in self.lead_data:
+                self.lead_data[field] = []
+            # Add to list if not already there
+            if isinstance(value, str):
+                # Split by common separators and add each item
+                items = [item.strip() for item in value.replace(" and ", ", ").split(",")]
+                for item in items:
+                    if item and item not in self.lead_data[field]:
+                        self.lead_data[field].append(item)
+            logger.info(f"Stored lead info: {field} = {self.lead_data[field]}")
+            return f"Got it, I've noted that down."
+        else:
+            self.lead_data[field] = value
+            logger.info(f"Stored lead info: {field} = {value}")
+            
+            # Auto-detect persona when role is stored
+            if field == "role":
+                await self.detect_persona(context, value)
+            
+            return f"Got it, I've noted your {field}."
+    
+    @function_tool
+    async def end_conversation(self, context: RunContext) -> str:
+        """End the conversation and save lead data."""
+        if self.conversation_ended:
+            return "Thank you for your time!"
+        
+        self.conversation_ended = True
+        
+        # Save final lead data
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"leads/complete_lead_{timestamp}.json"
+        
+        lead_summary = {
+            "timestamp": datetime.now().isoformat(),
+            "lead_data": self.lead_data,
+            "conversation_transcript": self.conversation_transcript,
+            "detected_persona": self.detected_persona
+        }
+        
+        os.makedirs("leads", exist_ok=True)
+        with open(filename, "w") as f:
+            json.dump(lead_summary, f, indent=2)
+        
+        logger.info(f"Complete lead data saved to {filename}")
+        
+        name = self.lead_data.get("name", "")
+        company = self.lead_data.get("company", "your company")
+        
+        return f"Thanks {name}! I've saved all your information. Our team will follow up with {company} soon. Have a great day!"
 
 
-# -----------------------
-# Prewarm function
-# -----------------------
 def prewarm(proc: JobProcess):
-    try:
-        proc.userdata["vad"] = silero.VAD.load()
-    except Exception as e:
-        logger.warning("VAD prewarm failed: %s", e)
-        proc.userdata["vad"] = None
+    proc.userdata["vad"] = silero.VAD.load()
 
-# -----------------------
-# Entrypoint
-# -----------------------
+
 async def entrypoint(ctx: JobContext):
-    """Main entry point for the tutor agent"""
-    ctx.log_context_fields = {"room": ctx.room.name}
-    logger.info("Starting Day4 tutor - room %s", ctx.room.name)
-
-    # Load content from persistent storage
-    content = load_content()
-    if not content:
-        logger.error("No content loaded. Please add day4_tutor_content.json")
-
-    # Initialize user data
-    userdata = {
-        "tutor": {
-            "mode": None,
-            "concept_id": None,
-            "quiz_index": 0,
-        },
-        "history": []
+    # Logging setup
+    ctx.log_context_fields = {
+        "room": ctx.room.name,
     }
+    
+    # Load environment variables
+    load_dotenv(".env.local", override=True)
+    
+    # Get Gemini API key
+    gemini_api_key = os.getenv("GOOGLE_API_KEY")
+    
+    if not gemini_api_key:
+        logger.error("GOOGLE_API_KEY not found in environment variables")
+        raise ValueError("GOOGLE_API_KEY is required")
+    
+    logger.info(f"Gemini API Key present: {bool(gemini_api_key)}")
 
-    # Create session with initial TTS
+    # Set up voice AI pipeline using Gemini, Murf, Deepgram
     session = AgentSession(
+        # Speech-to-text (STT)
         stt=deepgram.STT(model="nova-3"),
-        llm=google.LLM(model="gemini-2.5-flash", api_key=os.getenv("GOOGLE_API_KEY")),
-        tts=murf.TTS(voice=VOICE_LEARN, style="Conversation", text_pacing=True),
+        
+        # Large Language Model (LLM) - Using Gemini instead of Azure
+        llm=google.LLM(
+            model="gemini-2.5-flash",
+        ),
+        
+        # Text-to-speech (TTS)
+        tts=murf.TTS(
+            voice="en-IN-anusha", 
+            style="Conversation",
+            tokenizer=tokenize.basic.SentenceTokenizer(min_sentence_len=2),
+            text_pacing=True
+        ),
+        
+        # VAD and turn detection
         turn_detection=MultilingualModel(),
-        vad=ctx.proc.userdata.get("vad"),
-        userdata=userdata,
+        vad=ctx.proc.userdata["vad"],
+        
+        # Allow preemptive generation
+        preemptive_generation=True,
     )
 
-    # Create tutor agent
-    agent = TutorAgent(content)
-    agent._session = session  # Pass session to agent for voice switching
+    # Metrics collection
+    usage_collector = metrics.UsageCollector()
 
-    # Start session (MUST complete before event handlers are registered)
+    @session.on("metrics_collected")
+    def _on_metrics_collected(ev: MetricsCollectedEvent):
+        metrics.log_metrics(ev.metrics)
+        usage_collector.collect(ev.metrics)
+
+    async def log_usage():
+        summary = usage_collector.get_summary()
+        logger.info(f"Usage: {summary}")
+
+    ctx.add_shutdown_callback(log_usage)
+
+    # Start the session
     await session.start(
-        agent=agent,
+        agent=SimpleSDRAssistant(),
         room=ctx.room,
         room_input_options=RoomInputOptions(
-            noise_cancellation=noise_cancellation.BVC()
-        )
+            noise_cancellation=noise_cancellation.BVC(),
+        ),
     )
 
-    # Pass session reference for voice switching
-    agent._session = session
-    session.userdata['_session_ref'] = session
-
-    # Connect to room
+    # Join the room and connect to the user
     await ctx.connect()
 
-# -----------------------
-# Run worker
-# -----------------------
+
 if __name__ == "__main__":
-    cli.run_app(
-        WorkerOptions(
-            entrypoint_fnc=entrypoint,
-            prewarm_fnc=prewarm
-        )
-    )
+    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, prewarm_fnc=prewarm))

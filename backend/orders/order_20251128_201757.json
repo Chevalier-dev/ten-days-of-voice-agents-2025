@@ -1,0 +1,27 @@
+{
+  "customer": "John Snow",
+  "items": [
+    {
+      "name": "Instant Noodles",
+      "qty": 3,
+      "price": 60
+    },
+    {
+      "name": "Tomato Pasta Sauce",
+      "qty": 2,
+      "price": 280
+    },
+    {
+      "name": "Paneer Wrap",
+      "qty": 1,
+      "price": 130
+    },
+    {
+      "name": "Green Tea Bags",
+      "qty": 5,
+      "price": 450
+    }
+  ],
+  "total": 920,
+  "timestamp": "2025-11-28T20:17:57.253469"
+}

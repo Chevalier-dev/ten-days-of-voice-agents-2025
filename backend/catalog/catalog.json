@@ -1,0 +1,152 @@
+{
+    "items": [
+        {
+            "name": "Whole Wheat Bread",
+            "category": "groceries",
+            "price": 40,
+            "tags": [
+                "vegan"
+            ]
+        },
+        {
+            "name": "Eggs (12 pack)",
+            "category": "groceries",
+            "price": 65,
+            "tags": [
+                "protein"
+            ]
+        },
+        {
+            "name": "Milk 1L",
+            "category": "groceries",
+            "price": 55,
+            "tags": [
+                "dairy"
+            ]
+        },
+        {
+            "name": "Peanut Butter",
+            "category": "groceries",
+            "price": 160,
+            "tags": [
+                "protein"
+            ]
+        },
+        {
+            "name": "Pasta 500g",
+            "category": "groceries",
+            "price": 110,
+            "tags": []
+        },
+        {
+            "name": "Tomato Pasta Sauce",
+            "category": "groceries",
+            "price": 140,
+            "tags": [
+                "vegan"
+            ]
+        },
+        {
+            "name": "Banana Chips",
+            "category": "snacks",
+            "price": 45,
+            "tags": []
+        },
+        {
+            "name": "Chocolate Cookies",
+            "category": "snacks",
+            "price": 30,
+            "tags": []
+        },
+        {
+            "name": "Salted Peanuts",
+            "category": "snacks",
+            "price": 25,
+            "tags": [
+                "vegan"
+            ]
+        },
+        {
+            "name": "Nacho Chips",
+            "category": "snacks",
+            "price": 35,
+            "tags": []
+        },
+        {
+            "name": "Veg Sandwich",
+            "category": "prepared_food",
+            "price": 95,
+            "tags": [
+                "vegetarian"
+            ]
+        },
+        {
+            "name": "Paneer Wrap",
+            "category": "prepared_food",
+            "price": 130,
+            "tags": [
+                "vegetarian"
+            ]
+        },
+        {
+            "name": "Margherita Pizza",
+            "category": "prepared_food",
+            "price": 260,
+            "tags": [
+                "vegetarian"
+            ]
+        },
+        {
+            "name": "Chicken Roll",
+            "category": "prepared_food",
+            "price": 150,
+            "tags": [
+                "non-veg"
+            ]
+        },
+        {
+            "name": "Butter",
+            "category": "groceries",
+            "price": 60,
+            "tags": [
+                "dairy"
+            ]
+        },
+        {
+            "name": "Cheese Slices",
+            "category": "groceries",
+            "price": 85,
+            "tags": [
+                "dairy"
+            ]
+        },
+        {
+            "name": "Instant Noodles",
+            "category": "snacks",
+            "price": 20,
+            "tags": []
+        },
+        {
+            "name": "Basmati Rice 1kg",
+            "category": "groceries",
+            "price": 120,
+            "tags": []
+        },
+        {
+            "name": "Olive Oil",
+            "category": "groceries",
+            "price": 280,
+            "tags": [
+                "vegan"
+            ]
+        },
+        {
+            "name": "Green Tea Bags",
+            "category": "snacks",
+            "price": 90,
+            "tags": [
+                "healthy"
+            ]
+        }
+    ]
+}

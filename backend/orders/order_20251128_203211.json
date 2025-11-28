@@ -1,0 +1,22 @@
+{
+  "customer": "Sukumar",
+  "items": [
+    {
+      "name": "Whole Wheat Bread",
+      "qty": 1,
+      "price": 40
+    },
+    {
+      "name": "Peanut Butter",
+      "qty": 1,
+      "price": 160
+    },
+    {
+      "name": "Tomato Pasta Sauce",
+      "qty": 1,
+      "price": 140
+    }
+  ],
+  "total": 340,
+  "timestamp": "2025-11-28T20:32:11.024996"
+}
